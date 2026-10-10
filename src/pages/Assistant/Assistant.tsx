@@ -10,33 +10,9 @@ import AudioPlayer from '../../components/voice/AudioPlayer';
 import LatticeLoader from '../../components/loading/LatticeLoader';
 import LanguageSelector from '../../components/voice/LanguageSelector';
 import { SUPPORTED_LANGUAGES } from '../../lib/speech/languages';
+import { supabase } from '../../lib/supabase';
 
 type AssistantStatus = 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking' | 'error';
-
-const MOCK_RESPONSES: Record<string, string> = {
-  default: "I'm here to help! I can assist you with government services, utility payments, document applications, and more.\n\nTry asking me about a specific service you need help with.",
-  certificate: "I can help you apply for that certificate. Here's what you'll need:\n\n• Aadhaar Card (mandatory)\n• Address Proof (utility bill or voter ID)\n• Recent passport-size photograph\n\nThe process typically takes 3–7 working days. Shall I start the application for you?",
-  bill: "To pay your bill, I'll need:\n\n• Your Consumer/Account number\n• Registered mobile number\n\nI can process the payment securely through our integrated payment gateway. Which utility provider would you like to pay?",
-  status: "I found your recent requests:\n\n1. **Income Certificate** — Processing (REQ-2026-10-001)\n2. **Ration Card** — Completed (REQ-2026-09-001)\n3. **Driving License Renewal** — Pending document verification\n\nWould you like more details on any of these?",
-  license: "For driving license renewal, you'll need:\n\n• Current valid DL number\n• Aadhaar Card\n• Medical certificate (Form 1A)\n• Passport-size photos\n\nRenewal typically takes 15–30 days through the RTO. Would you like me to start the online application?",
-};
-
-const getResponse = (msg: string): string => {
-  const lower = msg.toLowerCase();
-  if (lower.includes('certificate') || lower.includes('income') || lower.includes('ration')) {
-    return MOCK_RESPONSES.certificate;
-  }
-  if (lower.includes('bill') || lower.includes('electricity') || lower.includes('water') || lower.includes('pay')) {
-    return MOCK_RESPONSES.bill;
-  }
-  if (lower.includes('status') || lower.includes('track') || lower.includes('application')) {
-    return MOCK_RESPONSES.status;
-  }
-  if (lower.includes('license') || lower.includes('driving') || lower.includes('passport')) {
-    return MOCK_RESPONSES.license;
-  }
-  return MOCK_RESPONSES.default;
-};
 
 const Assistant: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
@@ -97,30 +73,52 @@ const Assistant: React.FC = () => {
       timestamp: new Date().toISOString(),
     };
 
-    setMessages(prev => [...prev, userMsg]);
+    const newMessages = [...messages, userMsg];
+    setMessages(newMessages);
     setInput('');
     setTranscript('');
     setAssistantStatus('thinking');
 
-    // Simulate AI response
-    await new Promise(resolve => setTimeout(resolve, 1500 + Math.random() * 1000));
+    try {
+      const historyForApi = messages.slice(-10).map(m => ({ 
+        role: m.role, 
+        content: m.content 
+      }));
+      
+      const { data, error } = await supabase.functions.invoke('sahayak-chat', {
+        body: { 
+          message: text.trim(),
+          history: historyForApi
+        }
+      });
 
-    const assistantMsg: Message = {
-      id: `msg-${Date.now() + 1}`,
-      role: 'assistant',
-      content: getResponse(text),
-      timestamp: new Date().toISOString(),
-      // Add a placeholder audio url if we were really supporting speaking
-      // audioUrl: 'placeholder'
-    };
+      if (error) throw new Error(error.message);
+      if (data?.error) throw new Error(data.error);
 
-    setAssistantStatus('speaking'); // Prepare for audio playback
-    setMessages(prev => [...prev, assistantMsg]);
-    
-    // Auto idle after speaking mock
-    setTimeout(() => {
+      const assistantMsg: Message = {
+        id: `msg-${Date.now() + 1}`,
+        role: 'assistant',
+        content: data?.reply || "I'm sorry, I couldn't generate a response.",
+        timestamp: new Date().toISOString(),
+      };
+
+      setAssistantStatus('speaking'); // Prepare for audio playback if supported later
+      setMessages(prev => [...prev, assistantMsg]);
+      
+      setTimeout(() => {
+        setAssistantStatus('idle');
+      }, 2000);
+    } catch (err) {
+      console.error("Chat API error:", err);
+      const errorMsg: Message = {
+        id: `msg-${Date.now() + 1}`,
+        role: 'assistant',
+        content: "I'm having trouble connecting to my service right now. Please check your connection or try again later.",
+        timestamp: new Date().toISOString(),
+      };
+      setMessages(prev => [...prev, errorMsg]);
       setAssistantStatus('idle');
-    }, 2000);
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {

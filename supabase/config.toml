@@ -1,0 +1,8 @@
+project_id = "sflovpfjzsllpvwrkqxt"
+
+[api]
+enabled = true
+port = 54321
+
+[functions.sahayak-chat]
+verify_jwt = true
