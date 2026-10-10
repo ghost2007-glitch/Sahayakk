@@ -7,10 +7,14 @@ import type { Message } from '../../types';
 import { useVoiceInput } from '../../hooks/useVoiceInput';
 import VoiceRecordingScreen from '../../components/voice/VoiceRecordingScreen';
 import AudioPlayer from '../../components/voice/AudioPlayer';
+import SpeakButton from '../../components/voice/SpeakButton';
 import LatticeLoader from '../../components/loading/LatticeLoader';
 import LanguageSelector from '../../components/voice/LanguageSelector';
 import { SUPPORTED_LANGUAGES } from '../../lib/speech/languages';
 import { supabase } from '../../lib/supabase';
+import { FunctionsHttpError } from '@supabase/supabase-js';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 type AssistantStatus = 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking' | 'error';
 
@@ -80,44 +84,61 @@ const Assistant: React.FC = () => {
     setAssistantStatus('thinking');
 
     try {
-      const historyForApi = messages.slice(-10).map(m => ({ 
-        role: m.role, 
-        content: m.content 
-      }));
+      // Send only user/assistant turns (skip the initial greeting which is static)
+      const historyForApi = newMessages
+        .filter(m => m.id !== 'msg-001')
+        .slice(-20)
+        .map(m => ({ role: m.role, content: m.content }));
       
       const { data, error } = await supabase.functions.invoke('sahayak-chat', {
         body: { 
           message: text.trim(),
-          history: historyForApi
+          history: historyForApi.slice(0, -1) // exclude current message, it's sent separately
         }
       });
 
-      if (error) throw new Error(error.message);
-      if (data?.error) throw new Error(data.error);
+      // supabase.functions.invoke returns error for network-level failures and non-2xx status codes
+      if (error) {
+        if (error instanceof FunctionsHttpError) {
+          const body = await error.context.json().catch(() => null);
+          if (body && body.error) {
+            throw new Error(body.error);
+          }
+        }
+        console.error('Supabase invoke error:', error);
+        throw new Error('Network error — please check your connection.');
+      }
+
+      // The edge function returns { error: "..." } on HTTP 4xx/5xx (if it didn't throw above)
+      if (data?.error) {
+        throw new Error(data.error);
+      }
+
+      if (!data?.reply) {
+        throw new Error('Received an empty response. Please try again.');
+      }
 
       const assistantMsg: Message = {
         id: `msg-${Date.now() + 1}`,
         role: 'assistant',
-        content: data?.reply || "I'm sorry, I couldn't generate a response.",
+        content: data.reply,
         timestamp: new Date().toISOString(),
       };
 
-      setAssistantStatus('speaking'); // Prepare for audio playback if supported later
       setMessages(prev => [...prev, assistantMsg]);
-      
-      setTimeout(() => {
-        setAssistantStatus('idle');
-      }, 2000);
-    } catch (err) {
-      console.error("Chat API error:", err);
+      setAssistantStatus('idle');
+    } catch (err: any) {
+      console.error('Chat API error:', err);
+      const errorContent = err?.message || 'An unexpected error occurred. Please try again.';
       const errorMsg: Message = {
-        id: `msg-${Date.now() + 1}`,
+        id: `msg-error-${Date.now()}`,
         role: 'assistant',
-        content: "I'm having trouble connecting to my service right now. Please check your connection or try again later.",
+        content: errorContent,
         timestamp: new Date().toISOString(),
       };
       setMessages(prev => [...prev, errorMsg]);
-      setAssistantStatus('idle');
+      setAssistantStatus('error');
+      setTimeout(() => setAssistantStatus('idle'), 3000);
     }
   };
 
@@ -137,30 +158,6 @@ const Assistant: React.FC = () => {
     return new Date(isoString).toLocaleTimeString('en-IN', {
       hour: '2-digit',
       minute: '2-digit',
-    });
-  };
-
-  const formatContent = (content: string) => {
-    // Simple markdown-ish formatting
-    return content.split('\n').map((line, i) => {
-      if (line.startsWith('**') && line.endsWith('**')) {
-        return <strong key={i}>{line.slice(2, -2)}</strong>;
-      }
-      if (line.startsWith('• ')) {
-        return <div key={i} style={{ paddingLeft: '4px' }}>• {line.slice(2)}</div>;
-      }
-      if (line === '') return <div key={i} style={{ height: '8px' }} />;
-
-      // Inline bold
-      const parts = line.split(/\*\*(.*?)\*\*/g);
-      if (parts.length > 1) {
-        return (
-          <div key={i}>
-            {parts.map((part, j) => j % 2 === 1 ? <strong key={j}>{part}</strong> : part)}
-          </div>
-        );
-      }
-      return <div key={i}>{line}</div>;
     });
   };
 
@@ -284,9 +281,24 @@ const Assistant: React.FC = () => {
               className={msg.role === 'user' ? 'message-bubble message-user' : 'message-bubble message-assistant'}
               style={{ lineHeight: 1.55 }}
             >
-              {formatContent(msg.content)}
+              {msg.role === 'assistant' ? (
+                <div className="markdown-content">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {msg.content}
+                  </ReactMarkdown>
+                </div>
+              ) : (
+                msg.content
+              )}
               {msg.role === 'assistant' && msg.audioUrl && (
                 <AudioPlayer audioUrl={msg.audioUrl} />
+              )}
+              {msg.role === 'assistant' && msg.id !== 'msg-001' && !msg.id.startsWith('msg-error-') && (
+                <SpeakButton 
+                  text={msg.content} 
+                  lang={SUPPORTED_LANGUAGES.find(l => l.id === selectedLanguage)?.bcp47 || 'en-IN'} 
+                  autoPlay={msg.id === messages[messages.length - 1].id} 
+                />
               )}
             </div>
             <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)', padding: '0 4px' }}>

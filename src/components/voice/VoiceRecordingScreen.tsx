@@ -221,7 +221,7 @@ const VoiceRecordingScreen: React.FC<VoiceRecordingScreenProps> = ({
             letterSpacing: '0.5px',
             textTransform: 'uppercase'
           }}>
-            LIVE TRANSCRIPTION · {SUPPORTED_LANGUAGES.find(l => l.code === selectedLanguage)?.name || 'ENGLISH'}
+            LIVE TRANSCRIPTION · {SUPPORTED_LANGUAGES.find(l => l.id === selectedLanguage)?.name || 'ENGLISH'}
           </div>
           
           <div 

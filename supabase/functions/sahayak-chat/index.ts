@@ -1,5 +1,9 @@
 import { withSupabase } from 'npm:@supabase/server@1'
 
+const GEMINI_MODEL = 'gemini-3.8-flash';
+const MAX_MESSAGE_LENGTH = 2000;
+const MAX_HISTORY_TURNS = 20; // 10 user + 10 assistant
+
 const systemInstruction = `You are Sahayak, a helpful, respectful digital civic assistant for government services, public schemes, certificates, applications and general citizen guidance.
 - Understand questions about government services, documents, schemes and application procedures.
 - Give clear, step-by-step explanations in accessible language.
@@ -16,71 +20,103 @@ export default {
   fetch: withSupabase({ auth: 'user' }, async (req, ctx) => {
     try {
       if (req.method !== 'POST' && req.method !== 'OPTIONS') {
-        return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405 });
+        return Response.json({ error: 'Method not allowed' }, { status: 405 });
       }
 
-      const body = await req.json();
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return Response.json({ error: 'Invalid request body' }, { status: 400 });
+      }
+
       const userMessage = body.message;
-      const history = body.history || [];
+      const history: Array<{ role: string; content: string }> = Array.isArray(body.history)
+        ? body.history.slice(-MAX_HISTORY_TURNS)
+        : [];
 
       if (!userMessage || typeof userMessage !== 'string' || userMessage.trim().length === 0) {
-        return new Response(JSON.stringify({ error: 'Message is required' }), { status: 400 });
-      }
-      
-      if (userMessage.length > 2000) {
-        return new Response(JSON.stringify({ error: 'Message is too long' }), { status: 400 });
+        return Response.json({ error: 'Message is required' }, { status: 400 });
       }
 
-      const apiKey = Deno.env.get("GEMINI_API_KEY");
+      if (userMessage.length > MAX_MESSAGE_LENGTH) {
+        return Response.json({ error: 'Message is too long (max 2000 characters)' }, { status: 400 });
+      }
+
+      const apiKey = Deno.env.get('GEMINI_API_KEY');
       if (!apiKey) {
-        return new Response(JSON.stringify({ error: 'AI service configuration is missing' }), { status: 500 });
+        console.error('GEMINI_API_KEY is not set in Edge Function secrets');
+        return Response.json({ error: 'AI service is not configured. Please contact support.' }, { status: 503 });
       }
 
-      const contents = history.map((msg: any) => ({
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content }]
-      }));
-      contents.push({ role: 'user', parts: [{ text: userMessage }] });
+      // Build Gemini contents array from history + current message
+      const contents = history
+        .filter((msg) => msg.role && msg.content)
+        .map((msg) => ({
+          role: msg.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: msg.content }],
+        }));
+      contents.push({ role: 'user', parts: [{ text: userMessage.trim() }] });
 
-      const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+
+      const geminiResponse = await fetch(geminiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          system_instruction: {
-            parts: { text: systemInstruction }
+          systemInstruction: {
+            parts: [{ text: systemInstruction }],
           },
-          contents: contents,
+          contents,
           generationConfig: {
             temperature: 0.7,
-            maxOutputTokens: 800,
-          }
-        })
+            maxOutputTokens: 1024,
+          },
+        }),
       });
 
       if (!geminiResponse.ok) {
-        const errorText = await geminiResponse.text();
-        console.error('Gemini API Error:', errorText);
-        return new Response(JSON.stringify({ error: 'Failed to generate response' }), { status: 502 });
+        const status = geminiResponse.status;
+        let errorDetail = '';
+        try {
+          const errorBody = await geminiResponse.json();
+          errorDetail = errorBody?.error?.message || '';
+          console.error('Gemini API error:', status, errorDetail);
+        } catch {
+          console.error('Gemini API error: status', status);
+        }
+
+        if (status === 400) {
+          return Response.json({ error: 'The request could not be processed. Please try rephrasing your question.' }, { status: 400 });
+        }
+        if (status === 401 || status === 403) {
+          return Response.json({ error: 'AI service authentication failed. Please contact support.' }, { status: 502 });
+        }
+        if (status === 404) {
+          return Response.json({ error: 'AI model is temporarily unavailable. Please try again later.' }, { status: 502 });
+        }
+        if (status === 429) {
+          return Response.json({ error: 'AI service is busy. Please wait a moment and try again.' }, { status: 429 });
+        }
+        return Response.json({ error: 'AI service encountered an error. Please try again.' }, { status: 502 });
       }
 
       const data = await geminiResponse.json();
       const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
       if (!reply) {
-        return new Response(JSON.stringify({ error: 'Received empty response from AI model' }), { status: 502 });
+        const finishReason = data.candidates?.[0]?.finishReason;
+        console.error('Empty Gemini response. finishReason:', finishReason);
+        if (finishReason === 'SAFETY') {
+          return Response.json({ error: 'The response was blocked by safety filters. Please rephrase your question.' }, { status: 400 });
+        }
+        return Response.json({ error: 'The AI model returned an empty response. Please try again.' }, { status: 502 });
       }
 
-      // If we wanted to save to database we could do it here using ctx.supabase or ctx.supabaseAdmin
-      // However the prompt says "If database changes are not required for the initial AI integration, keep the first implementation focused on working chat responses."
-      // Since it's not strictly required yet and we want a minimum viable first step, we just return the reply.
-      
-      return new Response(JSON.stringify({ reply }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' }
-      });
+      return Response.json({ reply });
     } catch (error) {
-      console.error('Edge Function Error:', error);
-      return new Response(JSON.stringify({ error: 'An unexpected error occurred processing your request' }), { status: 500 });
+      console.error('Edge Function unhandled error:', error);
+      return Response.json({ error: 'An unexpected error occurred. Please try again.' }, { status: 500 });
     }
-  })
-}
+  }),
+};
