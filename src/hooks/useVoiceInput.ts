@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { webSpeechProvider } from '../lib/speech/WebSpeechProvider';
-import { SUPPORTED_LANGUAGES } from '../lib/speech/languages';
+import { Capacitor } from '@capacitor/core';
+import { VoiceRecorder } from 'capacitor-voice-recorder';
+import { supabase } from '../lib/supabase';
 
 export interface UseVoiceInputResult {
   isRecording: boolean;
@@ -37,10 +39,10 @@ export function useVoiceInput(): UseVoiceInputResult {
   const timerIntervalRef = useRef<number | null>(null);
   const finalTranscriptRef = useRef('');
   const audioChunksRef = useRef<BlobPart[]>([]);
-
-  // Check Web Speech API Support
+  
+  const isNative = Capacitor.isNativePlatform();
   const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-  const isSupported = !!SpeechRecognition;
+  const isSupported = isNative || !!SpeechRecognition || typeof MediaRecorder !== 'undefined';
 
   const cleanup = useCallback(() => {
     setIsRecording(false);
@@ -50,7 +52,7 @@ export function useVoiceInput(): UseVoiceInputResult {
       timerIntervalRef.current = null;
     }
 
-    if (webSpeechProvider.isLiveSupported) {
+    if (!isNative && webSpeechProvider.isLiveSupported) {
       webSpeechProvider.stopLiveTranscription?.();
     }
 
@@ -63,7 +65,28 @@ export function useVoiceInput(): UseVoiceInputResult {
       mediaStreamRef.current = null;
       setActiveStream(null);
     }
-  }, []);
+  }, [isNative]);
+
+  const transcribeWithBackend = async (base64Audio: string, mime: string) => {
+    try {
+      const { data, error } = await supabase.functions.invoke('sahayak-transcribe', {
+        body: { audioBase64: base64Audio, mimeType: mime, language: selectedLanguage }
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      if (data?.transcript) {
+        const txt = data.transcript;
+        finalTranscriptRef.current += txt + ' ';
+        setFinalTranscript(finalTranscriptRef.current.trim());
+        setTranscript(finalTranscriptRef.current.trim());
+      } else {
+        setError('Empty recording or transcription failed.');
+      }
+    } catch (err: any) {
+      console.error('Transcription error:', err);
+      setError('Failed to transcribe audio.');
+    }
+  };
 
   const startRecording = useCallback(async () => {
     setError(null);
@@ -76,102 +99,128 @@ export function useVoiceInput(): UseVoiceInputResult {
     setAudioBlob(null);
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
-      setActiveStream(stream);
-
-      // Start MediaRecorder for capturing audio independently
-      let options = {};
-      let selectedMimeType = '';
-      if (typeof MediaRecorder !== 'undefined') {
-        const types = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg'];
-        for (const type of types) {
-          if (MediaRecorder.isTypeSupported(type)) {
-            options = { mimeType: type };
-            selectedMimeType = type;
-            break;
+      if (isNative) {
+        // Native Voice Recorder
+        const hasPerm = await VoiceRecorder.hasAudioRecordingPermission();
+        if (!hasPerm.value) {
+          const perm = await VoiceRecorder.requestAudioRecordingPermission();
+          if (!perm.value) {
+            setError('Microphone permission denied. Please enable in Settings.');
+            cleanup();
+            return;
           }
         }
-      }
-      if (selectedMimeType) setMimeType(selectedMimeType);
-      console.log('Selected MediaRecorder MIME type:', selectedMimeType || 'default');
+        await VoiceRecorder.startRecording();
+      } else {
+        // Web MediaRecorder
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaStreamRef.current = stream;
+        setActiveStream(stream);
 
-      const mediaRecorder = new MediaRecorder(stream, options);
-      mediaRecorderRef.current = mediaRecorder;
-      
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorder.start(1000); // chunk every second
-
-      // Start live transcription if available
-      if (webSpeechProvider.isLiveSupported) {
-        webSpeechProvider.startLiveTranscription?.(
-          { language: selectedLanguage },
-          (text, isFinal) => {
-            if (isFinal) {
-              finalTranscriptRef.current += text + ' ';
-              setFinalTranscript(finalTranscriptRef.current.trim());
-              setInterimTranscript('');
-              setTranscript(finalTranscriptRef.current.trim());
-            } else {
-              setInterimTranscript(text);
-              setTranscript((finalTranscriptRef.current + text).trim());
-            }
-          },
-          (err) => {
-            console.warn('Live transcription warning/error:', err);
-            if (err === 'permission-denied') {
-              setError('Microphone permission denied.');
-              cleanup();
-            } else if (err === 'not-supported') {
-              // Ignore, rely on offline transcription later
+        let options = {};
+        let selectedMimeType = '';
+        if (typeof MediaRecorder !== 'undefined') {
+          const types = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg'];
+          for (const type of types) {
+            if (MediaRecorder.isTypeSupported(type)) {
+              options = { mimeType: type };
+              selectedMimeType = type;
+              break;
             }
           }
-        );
+        }
+        if (selectedMimeType) setMimeType(selectedMimeType);
+
+        const mediaRecorder = new MediaRecorder(stream, options);
+        mediaRecorderRef.current = mediaRecorder;
+        
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            audioChunksRef.current.push(event.data);
+          }
+        };
+        mediaRecorder.start(1000);
+
+        if (webSpeechProvider.isLiveSupported) {
+          webSpeechProvider.startLiveTranscription?.(
+            { language: selectedLanguage },
+            (text, isFinal) => {
+              if (isFinal) {
+                finalTranscriptRef.current += text + ' ';
+                setFinalTranscript(finalTranscriptRef.current.trim());
+                setInterimTranscript('');
+                setTranscript(finalTranscriptRef.current.trim());
+              } else {
+                setInterimTranscript(text);
+                setTranscript((finalTranscriptRef.current + text).trim());
+              }
+            },
+            (err) => {
+              console.warn('Live transcription warning/error:', err);
+              if (err === 'permission-denied') {
+                setError('Microphone permission denied.');
+                cleanup();
+              }
+            }
+          );
+        }
       }
 
       setIsRecording(true);
-      
       timerIntervalRef.current = window.setInterval(() => {
         setRecordingTime(prev => prev + 1);
       }, 1000);
 
     } catch (err: any) {
-      console.error('Error accessing microphone', err);
+      console.error('Error starting recording', err);
       setError('Microphone permission denied or not available.');
       cleanup();
     }
-  }, [cleanup, selectedLanguage]);
+  }, [cleanup, isNative, selectedLanguage]);
 
   const stopRecording = useCallback(async () => {
     cleanup();
     
-    // Process audio blob
-    if (audioChunksRef.current.length > 0) {
-      const blob = new Blob(audioChunksRef.current, { type: mimeType });
-      setAudioBlob(blob);
-      console.log(`Recorded Blob size: ${blob.size}, MIME type: ${mimeType}`);
-
-      // If we didn't get any live transcript, try post-transcription
-      if (!finalTranscriptRef.current.trim() && webSpeechProvider.transcribe) {
-        try {
-          const text = await webSpeechProvider.transcribe(blob, { language: selectedLanguage });
-          setTranscript(text);
-        } catch (err: any) {
-          setError(err.message || "Transcription unavailable. Future speech-to-text API required.");
+    try {
+      if (isNative) {
+        const result = await VoiceRecorder.stopRecording();
+        if (result.value && result.value.recordDataBase64) {
+          await transcribeWithBackend(result.value.recordDataBase64, result.value.mimeType || 'audio/aac');
+        } else {
+          setError("Empty recording.");
+        }
+      } else {
+        if (audioChunksRef.current.length > 0) {
+          const blob = new Blob(audioChunksRef.current, { type: mimeType });
+          setAudioBlob(blob);
+          
+          if (!finalTranscriptRef.current.trim()) {
+            const reader = new FileReader();
+            reader.readAsDataURL(blob);
+            reader.onloadend = async () => {
+              const base64data = reader.result?.toString().split(',')[1];
+              if (base64data) {
+                await transcribeWithBackend(base64data, mimeType);
+              }
+            };
+          }
+        } else if (!finalTranscriptRef.current.trim()) {
+          setError("Empty recording.");
         }
       }
-    } else if (!finalTranscriptRef.current.trim()) {
-      setError("Empty recording.");
+    } catch (err: any) {
+      console.error('Stop recording error:', err);
     }
+  }, [cleanup, isNative, mimeType, selectedLanguage]);
 
-  }, [cleanup, selectedLanguage]);
-
-  const cancelRecording = useCallback(() => {
+  const cancelRecording = useCallback(async () => {
+    if (isNative) {
+      try {
+        await VoiceRecorder.stopRecording();
+      } catch (e) {
+        // Ignore
+      }
+    }
     cleanup();
     setTranscript('');
     setFinalTranscript('');
@@ -179,13 +228,13 @@ export function useVoiceInput(): UseVoiceInputResult {
     finalTranscriptRef.current = '';
     audioChunksRef.current = [];
     setAudioBlob(null);
-  }, [cleanup]);
+  }, [cleanup, isNative]);
 
   useEffect(() => {
     return () => {
-      cleanup();
+      cancelRecording();
     };
-  }, [cleanup]);
+  }, [cancelRecording]);
 
   return {
     isRecording,
@@ -210,3 +259,4 @@ export function useVoiceInput(): UseVoiceInputResult {
     }
   };
 }
+

@@ -1,6 +1,5 @@
 import React, { useEffect, useRef } from 'react';
 import { Mic, X, Check } from 'lucide-react';
-import LanguageSelector from './LanguageSelector';
 import { SUPPORTED_LANGUAGES } from '../../lib/speech/languages';
 
 interface VoiceRecordingScreenProps {
@@ -152,10 +151,6 @@ const VoiceRecordingScreen: React.FC<VoiceRecordingScreenProps> = ({
           <Mic size={20} color="#3B82F6" /> Sahayak
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <LanguageSelector 
-            selectedLanguage={selectedLanguage}
-            onLanguageChange={onLanguageChange}
-          />
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <div style={{
               width: '8px',

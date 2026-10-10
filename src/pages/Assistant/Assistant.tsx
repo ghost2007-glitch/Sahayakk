@@ -9,7 +9,6 @@ import VoiceRecordingScreen from '../../components/voice/VoiceRecordingScreen';
 import AudioPlayer from '../../components/voice/AudioPlayer';
 import SpeakButton from '../../components/voice/SpeakButton';
 import LatticeLoader from '../../components/loading/LatticeLoader';
-import LanguageSelector from '../../components/voice/LanguageSelector';
 import { SUPPORTED_LANGUAGES } from '../../lib/speech/languages';
 import { supabase } from '../../lib/supabase';
 import { FunctionsHttpError } from '@supabase/supabase-js';
@@ -365,7 +364,7 @@ const Assistant: React.FC = () => {
                   e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
                 }}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask Sahayak anything..."
+                placeholder="Ask"
                 rows={1}
                 style={{
                   flex: 1,
@@ -390,13 +389,6 @@ const Assistant: React.FC = () => {
               </div>
             )}
             
-            {/* Language Selector */}
-            {!isRecording && (
-              <LanguageSelector 
-                selectedLanguage={selectedLanguage}
-                onLanguageChange={setSelectedLanguage}
-              />
-            )}
 
             {/* Mic button */}
             <button
